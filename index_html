@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>엘리베이터 대기 현황</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: sans-serif;
+      background: #0f172a;
+      color: white;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+      min-height: 100vh;
+    }
+    h2 { margin: 16px 0; font-size: 22px; }
+    video {
+      width: 100%;
+      max-width: 480px;
+      border-radius: 12px;
+      background: #1e293b;
+    }
+    .card {
+      background: #1e293b;
+      border-radius: 16px;
+      padding: 24px;
+      margin: 12px 0;
+      width: 100%;
+      max-width: 480px;
+      text-align: center;
+    }
+    .number {
+      font-size: 72px;
+      font-weight: bold;
+      color: #38bdf8;
+      line-height: 1;
+    }
+    .label {
+      font-size: 16px;
+      color: #94a3b8;
+      margin-top: 8px;
+    }
+    .status {
+      font-size: 13px;
+      color: #64748b;
+      margin-top: 16px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      margin-top: 12px;
+    }
+    .badge.low    { background: #166534; color: #86efac; }
+    .badge.medium { background: #854d0e; color: #fde68a; }
+    .badge.high   { background: #7f1d1d; color: #fca5a5; }
+  </style>
+</head>
+<body>
+
+  <h2>🛗 엘리베이터 대기 현황</h2>
+  <video id="cam" autoplay playsinline muted></video>
+  <canvas id="canvas" hidden></canvas>
+
+  <div class="card">
+    <div class="label">현재 대기 인원</div>
+    <div class="number" id="count">-</div>
+    <div class="label">명</div>
+    <div id="badge" class="badge low">여유</div>
+  </div>
+
+  <div class="card">
+    <div class="label">예상 대기시간</div>
+    <div class="number" id="waitTime">-</div>
+    <div class="label">분</div>
+  </div>
+
+  <div class="status" id="status">카메라 시작 중...</div>
+
+<script>
+  // ✅ 여기에 본인 API 키 붙여넣기
+  const API_KEY = "XIPFMlb62KdjGMq4cKEy";
+  const MODEL   = "coco/15";
+
+  const ELEVATOR_CYCLE = 2;   // 엘리베이터 왕복 평균 시간 (분)
+  const MAX_CAPACITY   = 10;  // 최대 탑승 인원
+  const INTERVAL_MS    = 3000; // 감지 주기 (3초)
+
+  // 카메라 시작
+  navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "environment" }
+  })
+  .then(stream => {
+    document.getElementById("cam").srcObject = stream;
+    document.getElementById("status").innerText = "✅ 카메라 연결됨 — 감지 중...";
+    setInterval(detectPeople, INTERVAL_MS);
+  })
+  .catch(err => {
+    document.getElementById("status").innerText = "❌ 카메라 오류: " + err.message;
+  });
+
+  async function detectPeople() {
+    const video  = document.getElementById("cam");
+    const canvas = document.getElementById("canvas");
+
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext("2d").drawImage(video, 0, 0);
+
+    const base64 = canvas.toDataURL("image/jpeg", 0.8).split(",")[1];
+
+    try {
+      const res = await fetch(
+        `https://detect.roboflow.com/${MODEL}?api_key=${API_KEY}&confidence=40`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: base64
+        }
+      );
+      const data = await res.json();
+
+      const count = data.predictions.filter(p => p.class === "person").length;
+      const trips = Math.ceil(count / MAX_CAPACITY);
+      const wait  = count === 0 ? 0 : (trips * ELEVATOR_CYCLE).toFixed(1);
+
+      document.getElementById("count").innerText   = count;
+      document.getElementById("waitTime").innerText = wait;
+      document.getElementById("status").innerText
+        = "마지막 감지: " + new Date().toLocaleTimeString();
+
+      // 혼잡도 뱃지
+      const badge = document.getElementById("badge");
+      if (count === 0)      { badge.className = "badge low";    badge.innerText = "여유"; }
+      else if (count <= 5)  { badge.className = "badge medium"; badge.innerText = "보통"; }
+      else                  { badge.className = "badge high";   badge.innerText = "혼잡"; }
+
+    } catch (err) {
+      document.getElementById("status").innerText = "⚠️ API 오류: " + err.message;
+    }
+  }
+</script>
+</body>
+</html>
