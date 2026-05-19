@@ -17,12 +17,20 @@
       min-height: 100vh;
     }
     h2 { margin: 16px 0; font-size: 22px; }
-    video {
+    .video-wrap {
+      position: relative;
       width: 100%;
       max-width: 480px;
-      border-radius: 12px;
-      background: #1e293b;
     }
+    video, canvas#overlay {
+      width: 100%;
+      border-radius: 12px;
+    }
+    canvas#overlay {
+      position: absolute;
+      top: 0; left: 0;
+    }
+    canvas#buf { display: none; }
     .card {
       background: #1e293b;
       border-radius: 16px;
@@ -32,13 +40,8 @@
       max-width: 480px;
       text-align: center;
     }
-    .number {
-      font-size: 72px;
-      font-weight: bold;
-      color: #38bdf8;
-      line-height: 1;
-    }
-    .label { font-size: 16px; color: #94a3b8; margin-top: 8px; }
+    .number { font-size: 72px; font-weight: bold; color: #38bdf8; line-height: 1; }
+    .label  { font-size: 16px; color: #94a3b8; margin-top: 8px; }
     .status { font-size: 13px; color: #64748b; margin-top: 16px; }
     .badge {
       display: inline-block;
@@ -50,91 +53,227 @@
     .badge.low    { background: #166534; color: #86efac; }
     .badge.medium { background: #854d0e; color: #fde68a; }
     .badge.high   { background: #7f1d1d; color: #fca5a5; }
+    .btn {
+      margin-top: 12px;
+      padding: 10px 24px;
+      background: #ef4444;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
   <h2>🛗 엘리베이터 대기 현황</h2>
-  <video id="cam" autoplay playsinline muted></video>
-  <canvas id="canvas" hidden></canvas>
+
+  <div class="video-wrap">
+    <video id="cam" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+  <canvas id="buf"></canvas>
 
   <div class="card">
     <div class="label">현재 대기 인원</div>
-    <div class="number" id="count">-</div>
+    <div class="number" id="count">0</div>
     <div class="label">명</div>
     <div id="badge" class="badge low">여유</div>
   </div>
 
   <div class="card">
     <div class="label">예상 대기시간</div>
-    <div class="number" id="waitTime">-</div>
+    <div class="number" id="waitTime">0</div>
     <div class="label">분</div>
   </div>
 
+  <button class="btn" onclick="resetCount()">🔄 인원 초기화</button>
   <div class="status" id="status">카메라 시작 중...</div>
 
 <script>
-  const API_KEY = "XIPFMlb62KdjGMq4cKEy";  // ← API 키 입력
-  const MODEL   = "coco/17";
-
   const ELEVATOR_CYCLE = 2;
   const MAX_CAPACITY   = 10;
-  const INTERVAL_MS    = 3000;
 
+  let waitingCount = 0;
+  let prevFrame    = null;
+  let trackedBlobs = []; // 이전 프레임 덩어리 위치 저장
+
+  const video   = document.getElementById("cam");
+  const overlay = document.getElementById("overlay");
+  const buf     = document.getElementById("buf");
+  const octx    = overlay.getContext("2d");
+  const bctx    = buf.getContext("2d");
+
+  // 카메라 시작
   navigator.mediaDevices.getUserMedia({
-    video: { facingMode: "environment" }
-  })
-  .then(stream => {
-    document.getElementById("cam").srcObject = stream;
-    document.getElementById("status").innerText = "✅ 카메라 연결됨 — 감지 중...";
-    setInterval(detectPeople, INTERVAL_MS);
-  })
-  .catch(err => {
+    video: { facingMode: "environment", width: 640, height: 480 }
+  }).then(stream => {
+    video.srcObject = stream;
+    video.onloadedmetadata = () => {
+      overlay.width  = video.videoWidth;
+      overlay.height = video.videoHeight;
+      buf.width      = video.videoWidth;
+      buf.height     = video.videoHeight;
+      document.getElementById("status").innerText = "✅ 감지 중...";
+      requestAnimationFrame(processFrame);
+    };
+  }).catch(err => {
     document.getElementById("status").innerText = "❌ 카메라 오류: " + err.message;
   });
 
-  async function detectPeople() {
-    const video  = document.getElementById("cam");
-    const canvas = document.getElementById("canvas");
+  function processFrame() {
+    const W = buf.width;
+    const H = buf.height;
+    const lineX = W / 2; // 중앙 세로선
 
-    canvas.width  = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext("2d").drawImage(video, 0, 0);
+    // 현재 프레임 캡처
+    bctx.drawImage(video, 0, 0, W, H);
+    const curr = bctx.getImageData(0, 0, W, H);
 
-    const base64 = canvas.toDataURL("image/jpeg", 0.8).split(",")[1];
+    // 오버레이 초기화
+    octx.clearRect(0, 0, W, H);
 
-    try {
-      const res = await fetch(
-        `https://detect.roboflow.com/${MODEL}?api_key=${API_KEY}&confidence=30`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: base64
+    // 중앙 세로선 그리기
+    octx.strokeStyle = "rgba(56, 189, 248, 0.8)";
+    octx.lineWidth   = 3;
+    octx.setLineDash([10, 5]);
+    octx.beginPath();
+    octx.moveTo(lineX, 0);
+    octx.lineTo(lineX, H);
+    octx.stroke();
+
+    if (prevFrame) {
+      // 배경 차분 (움직임 감지)
+      const diff  = new Uint8ClampedArray(W * H);
+      const pData = prevFrame.data;
+      const cData = curr.data;
+
+      for (let i = 0; i < W * H; i++) {
+        const r = Math.abs(cData[i*4]   - pData[i*4]);
+        const g = Math.abs(cData[i*4+1] - pData[i*4+1]);
+        const b = Math.abs(cData[i*4+2] - pData[i*4+2]);
+        diff[i] = (r + g + b) / 3 > 30 ? 255 : 0; // 임계값 30
+      }
+
+      // 덩어리(blob) 찾기 — 움직이는 영역의 중심점
+      const blobs = findBlobs(diff, W, H);
+
+      // 각 덩어리 그리기 & 선 통과 감지
+      blobs.forEach(blob => {
+        // 덩어리 박스 그리기
+        octx.strokeStyle = "#facc15";
+        octx.lineWidth   = 2;
+        octx.setLineDash([]);
+        octx.strokeRect(blob.x, blob.y, blob.w, blob.h);
+
+        // 이전 프레임에서 같은 덩어리 찾기 (위치 비교)
+        const prev = trackedBlobs.find(p =>
+          Math.abs(p.cx - blob.cx) < 100 && Math.abs(p.cy - blob.cy) < 100
+        );
+
+        if (prev) {
+          // 선 통과 감지
+          const crossedLeftToRight  = prev.cx < lineX && blob.cx >= lineX;
+          const crossedRightToLeft  = prev.cx > lineX && blob.cx <= lineX;
+
+          if (crossedLeftToRight) {
+            waitingCount++;
+            flashLine("green");
+          } else if (crossedRightToLeft) {
+            waitingCount = Math.max(0, waitingCount - 1);
+            flashLine("red");
+          }
         }
-      );
-      const data = await res.json();
-      console.log("API 응답:", JSON.stringify(data));
+      });
 
-      const persons = data.predictions.filter(
-        p => p.class === "person" || p.class === "Person"
-      );
-      const count = persons.length;
-      const trips = Math.ceil(count / MAX_CAPACITY);
-      const wait  = count === 0 ? 0 : (trips * ELEVATOR_CYCLE).toFixed(1);
-
-      document.getElementById("count").innerText    = count;
-      document.getElementById("waitTime").innerText = wait;
-      document.getElementById("status").innerText
-        = "마지막 감지: " + new Date().toLocaleTimeString();
-
-      const badge = document.getElementById("badge");
-      if (count === 0)     { badge.className = "badge low";    badge.innerText = "여유"; }
-      else if (count <= 5) { badge.className = "badge medium"; badge.innerText = "보통"; }
-      else                 { badge.className = "badge high";   badge.innerText = "혼잡"; }
-
-    } catch (err) {
-      document.getElementById("status").innerText = "⚠️ API 오류: " + err.message;
+      trackedBlobs = blobs;
+      updateUI();
     }
+
+    prevFrame = curr;
+    requestAnimationFrame(processFrame);
+  }
+
+  // 덩어리 찾기 함수
+  function findBlobs(diff, W, H) {
+    const visited = new Uint8Array(W * H);
+    const blobs   = [];
+    const minSize = 800; // 최소 덩어리 크기 (노이즈 제거)
+
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        if (diff[i] === 255 && !visited[i]) {
+          // BFS로 연결된 픽셀 찾기
+          const pixels = [];
+          const queue  = [i];
+          visited[i]   = 1;
+
+          while (queue.length) {
+            const idx = queue.pop();
+            pixels.push(idx);
+            const cx = idx % W;
+            const cy = Math.floor(idx / W);
+
+            [[0,1],[0,-1],[1,0],[-1,0]].forEach(([dx, dy]) => {
+              const nx = cx + dx;
+              const ny = cy + dy;
+              if (nx >= 0 && nx < W && ny >= 0 && ny < H) {
+                const ni = ny * W + nx;
+                if (diff[ni] === 255 && !visited[ni]) {
+                  visited[ni] = 1;
+                  queue.push(ni);
+                }
+              }
+            });
+          }
+
+          if (pixels.length >= minSize) {
+            const xs = pixels.map(p => p % W);
+            const ys = pixels.map(p => Math.floor(p / W));
+            const minX = Math.min(...xs);
+            const maxX = Math.max(...xs);
+            const minY = Math.min(...ys);
+            const maxY = Math.max(...ys);
+            blobs.push({
+              x: minX, y: minY,
+              w: maxX - minX,
+              h: maxY - minY,
+              cx: (minX + maxX) / 2,
+              cy: (minY + maxY) / 2
+            });
+          }
+        }
+      }
+    }
+    return blobs;
+  }
+
+  // 선 통과시 색상 효과
+  function flashLine(color) {
+    overlay.style.border = `4px solid ${color}`;
+    setTimeout(() => overlay.style.border = "none", 500);
+  }
+
+  // UI 업데이트
+  function updateUI() {
+    const trips = Math.ceil(waitingCount / MAX_CAPACITY);
+    const wait  = waitingCount === 0 ? 0 : (trips * ELEVATOR_CYCLE).toFixed(1);
+
+    document.getElementById("count").innerText    = waitingCount;
+    document.getElementById("waitTime").innerText = wait;
+
+    const badge = document.getElementById("badge");
+    if (waitingCount === 0)     { badge.className = "badge low";    badge.innerText = "여유"; }
+    else if (waitingCount <= 5) { badge.className = "badge medium"; badge.innerText = "보통"; }
+    else                        { badge.className = "badge high";   badge.innerText = "혼잡"; }
+  }
+
+  function resetCount() {
+    waitingCount = 0;
+    updateUI();
   }
 </script>
 </body>
 </html>
+
