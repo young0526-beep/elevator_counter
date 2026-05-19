@@ -38,16 +38,8 @@
       color: #38bdf8;
       line-height: 1;
     }
-    .label {
-      font-size: 16px;
-      color: #94a3b8;
-      margin-top: 8px;
-    }
-    .status {
-      font-size: 13px;
-      color: #64748b;
-      margin-top: 16px;
-    }
+    .label { font-size: 16px; color: #94a3b8; margin-top: 8px; }
+    .status { font-size: 13px; color: #64748b; margin-top: 16px; }
     .badge {
       display: inline-block;
       padding: 4px 12px;
@@ -61,7 +53,6 @@
   </style>
 </head>
 <body>
-
   <h2>🛗 엘리베이터 대기 현황</h2>
   <video id="cam" autoplay playsinline muted></video>
   <canvas id="canvas" hidden></canvas>
@@ -82,15 +73,13 @@
   <div class="status" id="status">카메라 시작 중...</div>
 
 <script>
-  // ✅ 여기에 본인 API 키 붙여넣기
-  const API_KEY = "XIPFMlb62KdjGMq4cKEy";
-  const MODEL   = "coco/15";
+  const API_KEY = "XIPFMlb62KdjGMq4cKEy";  // ← API 키 입력
+  const MODEL   = "coco/17";
 
-  const ELEVATOR_CYCLE = 2;   // 엘리베이터 왕복 평균 시간 (분)
-  const MAX_CAPACITY   = 10;  // 최대 탑승 인원
-  const INTERVAL_MS    = 3000; // 감지 주기 (3초)
+  const ELEVATOR_CYCLE = 2;
+  const MAX_CAPACITY   = 10;
+  const INTERVAL_MS    = 3000;
 
-  // 카메라 시작
   navigator.mediaDevices.getUserMedia({
     video: { facingMode: "environment" }
   })
@@ -115,7 +104,7 @@
 
     try {
       const res = await fetch(
-        `https://detect.roboflow.com/${MODEL}?api_key=${API_KEY}&confidence=40`,
+        `https://detect.roboflow.com/${MODEL}?api_key=${API_KEY}&confidence=30`,
         {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -123,21 +112,24 @@
         }
       );
       const data = await res.json();
+      console.log("API 응답:", JSON.stringify(data));
 
-      const count = data.predictions.filter(p => p.class === "person").length;
+      const persons = data.predictions.filter(
+        p => p.class === "person" || p.class === "Person"
+      );
+      const count = persons.length;
       const trips = Math.ceil(count / MAX_CAPACITY);
       const wait  = count === 0 ? 0 : (trips * ELEVATOR_CYCLE).toFixed(1);
 
-      document.getElementById("count").innerText   = count;
+      document.getElementById("count").innerText    = count;
       document.getElementById("waitTime").innerText = wait;
       document.getElementById("status").innerText
         = "마지막 감지: " + new Date().toLocaleTimeString();
 
-      // 혼잡도 뱃지
       const badge = document.getElementById("badge");
-      if (count === 0)      { badge.className = "badge low";    badge.innerText = "여유"; }
-      else if (count <= 5)  { badge.className = "badge medium"; badge.innerText = "보통"; }
-      else                  { badge.className = "badge high";   badge.innerText = "혼잡"; }
+      if (count === 0)     { badge.className = "badge low";    badge.innerText = "여유"; }
+      else if (count <= 5) { badge.className = "badge medium"; badge.innerText = "보통"; }
+      else                 { badge.className = "badge high";   badge.innerText = "혼잡"; }
 
     } catch (err) {
       document.getElementById("status").innerText = "⚠️ API 오류: " + err.message;
