@@ -95,7 +95,9 @@
   const MAX_CAPACITY   = 10;
 
   let waitingCount = 0;
-  let prevFrame    = null;
+  let prevFrame = null;
+  let bgFrame   = null;
+  let frameCount = 0;
   let trackedBlobs = []; // 이전 프레임 덩어리 위치 저장
 
   const video   = document.getElementById("cam");
@@ -143,17 +145,22 @@
     octx.stroke();
 
     if (prevFrame) {
-      // 배경 차분 (움직임 감지)
-      const diff  = new Uint8ClampedArray(W * H);
-      const pData = prevFrame.data;
-      const cData = curr.data;
+      frameCount++;
 
+  // 30프레임마다 배경 업데이트 (적응형 배경)
+     if (!bgFrame || frameCount % 30 === 0) {
+       bgFrame = prevFrame;
+      }
+      const diff  = new Uint8ClampedArray(W * H);
+      const pData = bgFrame.data;
+      const cData = curr.data;
+      
       for (let i = 0; i < W * H; i++) {
         const r = Math.abs(cData[i*4]   - pData[i*4]);
         const g = Math.abs(cData[i*4+1] - pData[i*4+1]);
         const b = Math.abs(cData[i*4+2] - pData[i*4+2]);
-        diff[i] = (r + g + b) / 3 > 20 ? 255 : 0; // 임계값 30
-      }
+        diff[i] = (r + g + b) / 3 > 25 ? 255 : 0;
+       }
 
       // 덩어리(blob) 찾기 — 움직이는 영역의 중심점
       const blobs = findBlobs(diff, W, H);
@@ -226,12 +233,15 @@
           }
 
           if (pixels.length >= minSize) {
-            const xs = pixels.map(p => p % W);
-            const ys = pixels.map(p => Math.floor(p / W));
-            const minX = Math.min(...xs);
-            const maxX = Math.max(...xs);
-            const minY = Math.min(...ys);
-            const maxY = Math.max(...ys);
+            let minX = W, maxX = 0, minY = H, maxY = 0;
+            for (const p of pixels) {
+              const px = p % W;
+              const py = Math.floor(p / W);
+              if (px < minX) minX = px;
+              if (px > maxX) maxX = px;
+              if (py < minY) minY = py;
+              if (py > maxY) maxY = py;
+            }
             blobs.push({
               x: minX, y: minY,
               w: maxX - minX,
@@ -258,7 +268,7 @@
     const wait  = waitingCount === 0 ? 0 : (trips * ELEVATOR_CYCLE).toFixed(1);
 
     document.getElementById("count").innerText    = waitingCount;
-    document.getElementById("waitTime").innerText = wait;99
+    document.getElementById("waitTime").innerText = wait;
 
     const badge = document.getElementById("badge");
     if (waitingCount === 0)     { badge.className = "badge low";    badge.innerText = "여유"; }
@@ -273,4 +283,3 @@
 </script>
 </body>
 </html>
-
