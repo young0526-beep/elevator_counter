@@ -195,7 +195,7 @@
   function findBlobs(diff, W, H) {
     const visited = new Uint8Array(W * H);
     const blobs   = [];
-    const minSize = 80; // 최소 덩어리 크기 (노이즈 제거)
+    const minSize = 300; // 최소 덩어리 크기 (노이즈 제거)
 
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
@@ -258,7 +258,7 @@
     const wait  = waitingCount === 0 ? 0 : (trips * ELEVATOR_CYCLE).toFixed(1);
 
     document.getElementById("count").innerText    = waitingCount;
-    document.getElementById("waitTime").innerText = wait;
+    document.getElementById("waitTime").innerText = wait;99
 
     const badge = document.getElementById("badge");
     if (waitingCount === 0)     { badge.className = "badge low";    badge.innerText = "여유"; }
