@@ -152,7 +152,7 @@
         const r = Math.abs(cData[i*4]   - pData[i*4]);
         const g = Math.abs(cData[i*4+1] - pData[i*4+1]);
         const b = Math.abs(cData[i*4+2] - pData[i*4+2]);
-        diff[i] = (r + g + b) / 3 > 30 ? 255 : 0; // 임계값 30
+        diff[i] = (r + g + b) / 3 > 20 ? 255 : 0; // 임계값 30
       }
 
       // 덩어리(blob) 찾기 — 움직이는 영역의 중심점
@@ -168,7 +168,7 @@
 
         // 이전 프레임에서 같은 덩어리 찾기 (위치 비교)
         const prev = trackedBlobs.find(p =>
-          Math.abs(p.cx - blob.cx) < 100 && Math.abs(p.cy - blob.cy) < 100
+          Math.abs(p.cx - blob.cx) < 160 && Math.abs(p.cy - blob.cy) < 160
         );
 
         if (prev) {
@@ -179,10 +179,7 @@
           if (crossedLeftToRight) {
             waitingCount++;
             flashLine("green");
-          } else if (crossedRightToLeft) {
-            waitingCount = Math.max(0, waitingCount - 1);
-            flashLine("red");
-          }
+          } 
         }
       });
 
@@ -198,7 +195,7 @@
   function findBlobs(diff, W, H) {
     const visited = new Uint8Array(W * H);
     const blobs   = [];
-    const minSize = 800; // 최소 덩어리 크기 (노이즈 제거)
+    const minSize = 80; // 최소 덩어리 크기 (노이즈 제거)
 
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
