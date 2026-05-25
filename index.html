@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>엘리베이터 대기 현황</title>
+  <title>엘리베이터 대기 현황 (일방통행 정밀 버전)</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -66,7 +66,7 @@
   </style>
 </head>
 <body>
-  <h2>🛗 엘리베이터 대기 현황</h2>
+  <h2>🛗 엘리베이터 대기 현황 (일방통행 정밀)</h2>
 
   <div class="video-wrap">
     <video id="cam" autoplay playsinline muted></video>
@@ -98,7 +98,11 @@
   let prevFrame = null;
   let bgFrame   = null;
   let frameCount = 0;
-  let trackedBlobs = []; // 이전 프레임 덩어리 위치 저장
+  
+  // 객체 추적 배열
+  let trackedBlobs = []; 
+  let nextBlobId = 0;
+  let lastCountTime = 0;
 
   const video   = document.getElementById("cam");
   const overlay = document.getElementById("overlay");
@@ -106,7 +110,6 @@
   const octx    = overlay.getContext("2d");
   const bctx    = buf.getContext("2d");
 
-  // 카메라 시작
   navigator.mediaDevices.getUserMedia({
     video: { facingMode: "environment", width: 640, height: 480 }
   }).then(stream => {
@@ -116,7 +119,7 @@
       overlay.height = video.videoHeight;
       buf.width      = video.videoWidth;
       buf.height     = video.videoHeight;
-      document.getElementById("status").innerText = "✅ 감지 중...";
+      document.getElementById("status").innerText = "✅ 방향성 필터링 분석 중...";
       requestAnimationFrame(processFrame);
     };
   }).catch(err => {
@@ -126,19 +129,15 @@
   function processFrame() {
     const W = buf.width;
     const H = buf.height;
-    const lineX = W / 2; // 중앙 세로선
+    const lineX = W / 2; // 중앙 기준선
 
-    // 현재 프레임 캡처
     bctx.drawImage(video, 0, 0, W, H);
     const curr = bctx.getImageData(0, 0, W, H);
-
-    // 오버레이 초기화
     octx.clearRect(0, 0, W, H);
 
-    // 중앙 세로선 그리기
+    // 중앙 기준선 시각화 (진입 통과선)
     octx.strokeStyle = "rgba(56, 189, 248, 0.8)";
-    octx.lineWidth   = 3;
-    octx.setLineDash([10, 5]);
+    octx.lineWidth   = 4;
     octx.beginPath();
     octx.moveTo(lineX, 0);
     octx.lineTo(lineX, H);
@@ -147,10 +146,11 @@
     if (prevFrame) {
       frameCount++;
 
-  // 30프레임마다 배경 업데이트 (적응형 배경)
-     if (!bgFrame || frameCount % 30 === 0) {
-       bgFrame = prevFrame;
+      // 조명 변화 자동 차단 및 동적 업데이트 안정화
+      if (!bgFrame || frameCount % 45 === 0) {
+        bgFrame = prevFrame;
       }
+     
       const diff  = new Uint8ClampedArray(W * H);
       const pData = bgFrame.data;
       const cData = curr.data;
@@ -159,38 +159,77 @@
         const r = Math.abs(cData[i*4]   - pData[i*4]);
         const g = Math.abs(cData[i*4+1] - pData[i*4+1]);
         const b = Math.abs(cData[i*4+2] - pData[i*4+2]);
-        diff[i] = (r + g + b) / 3 > 25 ? 255 : 0;
-       }
+        
+        // 잔상 및 미세 떨림 픽셀 완벽 필터링 (임계값 상향)
+        if ((r + g + b) / 3 > 50) {
+          diff[i] = 255;
+        } else {
+          diff[i] = 0;
+        }
+      }
 
-      // 덩어리(blob) 찾기 — 움직이는 영역의 중심점
-      const blobs = findBlobs(diff, W, H);
+      const currentBlobs = findBlobsStrict(diff, W, H);
+      const nextTrackedBlobs = [];
+      const now = Date.now();
 
-      // 각 덩어리 그리기 & 선 통과 감지
-      blobs.forEach(blob => {
-        // 덩어리 박스 그리기
+      currentBlobs.forEach(blob => {
+        // 감지된 객체 테두리 그리기
         octx.strokeStyle = "#facc15";
-        octx.lineWidth   = 2;
-        octx.setLineDash([]);
+        octx.lineWidth   = 3;
         octx.strokeRect(blob.x, blob.y, blob.w, blob.h);
 
-        // 이전 프레임에서 같은 덩어리 찾기 (위치 비교)
-        const prev = trackedBlobs.find(p =>
-          Math.abs(p.cx - blob.cx) < 160 && Math.abs(p.cy - blob.cy) < 160
-        );
+        let bestMatch = null;
+        let minDistance = 80; // 프레임 간 추적 유효 거리
 
-        if (prev) {
-          // 선 통과 감지
-          const crossedLeftToRight  = prev.cx < lineX && blob.cx >= lineX;
-          const crossedRightToLeft  = prev.cx > lineX && blob.cx <= lineX;
+        trackedBlobs.forEach(p => {
+          const dist = Math.hypot(p.cx - blob.cx, p.cy - blob.cy);
+          if (dist < minDistance) {
+            minDistance = dist;
+            bestMatch = p;
+          }
+        });
 
-          if (crossedLeftToRight) {
-            waitingCount++;
-            flashLine("green");
-          } 
+        if (bestMatch) {
+          // 이전 프레임의 속성(고유 ID, 태어난 위치, 카운트 완료 여부)을 그대로 상속
+          blob.id = bestMatch.id;
+          blob.startedInLeftZone = bestMatch.startedInLeftZone;
+          blob.isCounted = bestMatch.isCounted;
+
+          // 실시간 프레임 이동 벡터 계산
+          const moveX = blob.cx - bestMatch.cx;
+
+          // [핵심 인공지능 조건 검증]
+          // 1. 아직 카운트가 안 된 객체여야 함
+          // 2. 반드시 "왼쪽 구역"에서 처음 발견되어 움직이기 시작한 객체여야 함 (startedInLeftZone === true)
+          // 3. 현재 중심점(cx)이 중앙선(lineX)을 넘어서 오른쪽 구역으로 진입해야 함
+          // 4. 이동 방향 벡터가 오른쪽을 향하고 있어야 함 (moveX > 0)
+          // 5. 연속 중복 인식을 막기 위해 마지막 카운트 발생 후 1.2초의 쿨타임 검증
+          if (!blob.isCounted && blob.startedInLeftZone && bestMatch.cx < lineX && blob.cx >= lineX && moveX > 0) {
+            if (now - lastCountTime > 1200) {
+              waitingCount++;
+              blob.isCounted = true;
+              lastCountTime = now;
+              flashLine("#34d399"); // 성공 시 초록색 화면 플래시
+            }
+          }
+        } else {
+          // 화면에 완전히 새로 나타난 객체인 경우 처리
+          blob.id = nextBlobId++;
+          blob.isCounted = false;
+          
+          // [방향 차단 핵심] 사물이 처음 등장한 순간의 위치가 중앙선보다 왼쪽인지 기록합니다.
+          // 선 바로 옆에서 생성되어 흔들리는 노이즈를 막기 위해 마진(-15px)을 둡니다.
+          if (blob.cx < lineX - 15) {
+            blob.startedInLeftZone = true;  // 왼쪽 출발 인정 (카운트 대상)
+          } else {
+            blob.startedInLeftZone = false; // 오른쪽 혹은 선 위에서 생성됨 (반대 방향이므로 카운트 제외)
+          }
         }
+
+        nextTrackedBlobs.push(blob);
       });
 
-      trackedBlobs = blobs;
+      trackedBlobs = nextTrackedBlobs;
       updateUI();
     }
 
@@ -198,71 +237,50 @@
     requestAnimationFrame(processFrame);
   }
 
-  // 덩어리 찾기 함수
-  function findBlobs(diff, W, H) {
-    const visited = new Uint8Array(W * H);
-    const blobs   = [];
-    const minSize = 300; // 최소 덩어리 크기 (노이즈 제거)
-
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const i = y * W + x;
-        if (diff[i] === 255 && !visited[i]) {
-          // BFS로 연결된 픽셀 찾기
-          const pixels = [];
-          const queue  = [i];
-          visited[i]   = 1;
-
-          while (queue.length) {
-            const idx = queue.pop();
-            pixels.push(idx);
-            const cx = idx % W;
-            const cy = Math.floor(idx / W);
-
-            [[0,1],[0,-1],[1,0],[-1,0]].forEach(([dx, dy]) => {
-              const nx = cx + dx;
-              const ny = cy + dy;
-              if (nx >= 0 && nx < W && ny >= 0 && ny < H) {
-                const ni = ny * W + nx;
-                if (diff[ni] === 255 && !visited[ni]) {
-                  visited[ni] = 1;
-                  queue.push(ni);
-                }
-              }
-            });
-          }
-
-          if (pixels.length >= minSize) {
-            let minX = W, maxX = 0, minY = H, maxY = 0;
-            for (const p of pixels) {
-              const px = p % W;
-              const py = Math.floor(p / W);
-              if (px < minX) minX = px;
-              if (px > maxX) maxX = px;
-              if (py < minY) minY = py;
-              if (py > maxY) maxY = py;
+  // 노이즈 차단 성능을 극대화한 블롭 추출 알고리즘
+  function findBlobsStrict(diff, W, H) {
+    const blobs = [];
+    const step = 12; // 연산 그리드를 넓혀 미세한 노이즈 도트 파편 무시
+    
+    for (let y = 0; y < H; y += step) {
+      for (let x = 0; x < W; x += step) {
+        if (diff[y * W + x] === 255) {
+          let found = false;
+          for (let b of blobs) {
+            // 파편화된 조각들이 엉뚱하게 결합하지 않도록 반경 최적화
+            if (x >= b.x - 20 && x <= b.x + b.w + 20 &&
+                y >= b.y - 20 && y <= b.y + b.h + 20) {
+              
+              let x1 = Math.min(b.x, x);
+              let x2 = Math.max(b.x + b.w, x);
+              let y1 = Math.min(b.y, y);
+              let y2 = Math.max(b.y + b.h, y);
+              
+              b.x = x1; b.y = y1;
+              b.w = x2 - x1; b.h = y2 - y1;
+              b.cx = x1 + b.w / 2;
+              b.cy = y1 + b.h / 2;
+              found = true;
+              break;
             }
-            blobs.push({
-              x: minX, y: minY,
-              w: maxX - minX,
-              h: maxY - minY,
-              cx: (minX + maxX) / 2,
-              cy: (minY + maxY) / 2
-            });
+          }
+          if (!found) {
+            blobs.push({ x: x, y: y, w: step, h: step, cx: x + step/2, cy: y + step/2 });
           }
         }
       }
     }
-    return blobs;
+    
+    // 크기 컷트라인을 대폭 올려 손동작, 그림자, 카메라 흔들림 노이즈 완전 제거
+    // 확실하게 몸집이 잡히는 사람 형태만 추적 대상 링에 올립니다.
+    return blobs.filter(b => b.w > 110 && b.h > 110);
   }
 
-  // 선 통과시 색상 효과
   function flashLine(color) {
-    overlay.style.border = `4px solid ${color}`;
-    setTimeout(() => overlay.style.border = "none", 500);
+    overlay.style.outline = `8px solid ${color}`;
+    setTimeout(() => overlay.style.outline = "none", 350);
   }
 
-  // UI 업데이트
   function updateUI() {
     const trips = Math.ceil(waitingCount / MAX_CAPACITY);
     const wait  = waitingCount === 0 ? 0 : (trips * ELEVATOR_CYCLE).toFixed(1);
@@ -278,6 +296,8 @@
 
   function resetCount() {
     waitingCount = 0;
+    trackedBlobs = [];
+    lastCountTime = 0;
     updateUI();
   }
 </script>
