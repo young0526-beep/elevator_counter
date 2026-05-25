@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>엘리베이터 대기 현황</title>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+  <h1>🛗 엘리베이터 대기 현황</h1>
+
+  <h2>현재 대기 인원</h2>
+  <div id="count">0</div>
+
+  <h2>예상 대기 시간</h2>
+  <div id="waitTime">0분</div>
+
+  <h2>상태</h2>
+  <div id="status">여유</div>
+
+  <script>
+    const socket = io();
+
+    socket.on("stateUpdate", function(state) {
+      document.getElementById("count").innerText = state.waitingCount;
+      document.getElementById("waitTime").innerText = state.waitTime + "분";
+      document.getElementById("status").innerText = state.status;
+    });
+  </script>
+</body>
+</html>
