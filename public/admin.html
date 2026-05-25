@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>관리자 카메라 화면</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: sans-serif;
+      background: #0f172a;
+      color: white;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+      min-height: 100vh;
+    }
+    h2 { margin: 16px 0; font-size: 22px; }
+    .video-wrap {
+      position: relative;
+      width: 100%;
+      max-width: 480px;
+    }
+    video, canvas#overlay {
+      width: 100%;
+      border-radius: 12px;
+    }
+    canvas#overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    canvas#buf { display: none; }
+    .card {
+      background: #1e293b;
+      border-radius: 16px;
+      padding: 24px;
+      margin: 12px 0;
+      width: 100%;
+      max-width: 480px;
+      text-align: center;
+    }
+    .number {
+      font-size: 72px;
+      font-weight: bold;
+      color: #38bdf8;
+      line-height: 1;
+    }
+    .label {
+      font-size: 16px;
+      color: #94a3b8;
+      margin-top: 8px;
+    }
+    .status {
+      font-size: 13px;
+      color: #64748b;
+      margin-top: 16px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      margin-top: 12px;
+    }
+    .badge.low { background: #166534; color: #86efac; }
+    .badge.medium { background: #854d0e; color: #fde68a; }
+    .badge.high { background: #7f1d1d; color: #fca5a5; }
+    .btn {
+      margin-top: 12px;
+      padding: 10px 24px;
+      background: #ef4444;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+
+<body>
+  <h2>🛗 관리자 카메라 화면</h2>
+
+  <div class="video-wrap">
+    <video id="cam" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+  <canvas id="buf"></canvas>
+
+  <div class="card">
+    <div class="label">현재 대기 인원</div>
+    <div class="number" id="count">0</div>
+    <div class="label">명</div>
+    <div id="badge" class="badge low">여유</div>
+  </div>
+
+  <div class="card">
+    <div class="label">예상 대기시간</div>
+    <div class="number" id="waitTime">0</div>
+    <div class="label">분</div>
+  </div>
+
+  <button class="btn" onclick="resetCount()">🔄 인원 초기화</button>
+  <div class="status" id="status">카메라 시작 중...</div>
+
+<script>
+  const socket = io();
+
+  const ELEVATOR_CYCLE = 2;
+  const MAX_CAPACITY = 10;
+
+  let waitingCount = 0;
+  let prevFrame = null;
+  let bgFrame = null;
+  let frameCount = 0;
+
+  let trackedBlobs = [];
+  let nextBlobId = 0;
+  let lastCountTime = 0;
+
+  let wakeLock = null;
+
+  const video = document.getElementById("cam");
+  const overlay = document.getElementById("overlay");
+  const buf = document.getElementById("buf");
+  const octx = overlay.getContext("2d");
+  const bctx = buf.getContext("2d");
+
+  navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "environment", width: 640, height: 480 }
+  }).then(stream => {
+    video.srcObject = stream;
+
+    video.onloadedmetadata = () => {
+      overlay.width = video.videoWidth;
+      overlay.height = video.videoHeight;
+      buf.width = video.videoWidth;
+      buf.height = video.videoHeight;
+
+      document.getElementById("status").innerText = "✅ 정밀 감지 중";
+      requestWakeLock();
+      requestAnimationFrame(processFrame);
+    };
+  }).catch(err => {
+    document.getElementById("status").innerText = "❌ 카메라 오류: " + err.message;
+  });
+
+  async function requestWakeLock() {
+    try {
+      if ("wakeLock" in navigator) {
+        wakeLock = await navigator.wakeLock.request("screen");
+        document.getElementById("status").innerText = "✅ 정밀 감지 중 / 화면 꺼짐 방지 On";
+      }
+    } catch (err) {
+      console.log(err);
+    }
+  }
+
+  document.addEventListener("visibilitychange", async () => {
+    if (wakeLock !== null && document.visibilityState === "visible") {
+      await requestWakeLock();
+    }
+  });
+
+  function processFrame() {
+    const W = buf.width;
+    const H = buf.height;
+    const lineX = W / 2;
+
+    bctx.drawImage(video, 0, 0, W, H);
+    const curr = bctx.getImageData(0, 0, W, H);
+
+    octx.clearRect(0, 0, W, H);
+
+    octx.strokeStyle = "rgba(56, 189, 248, 0.8)";
+    octx.lineWidth = 4;
+    octx.beginPath();
+    octx.moveTo(lineX, 0);
+    octx.lineTo(lineX, H);
+    octx.stroke();
+
+    if (prevFrame) {
+      frameCount++;
+
+      if (!bgFrame || frameCount % 45 === 0) {
+        bgFrame = prevFrame;
+      }
+
+      const diff = new Uint8ClampedArray(W * H);
+      const pData = bgFrame.data;
+      const cData = curr.data;
+
+      for (let i = 0; i < W * H; i++) {
+        const r = Math.abs(cData[i * 4] - pData[i * 4]);
+        const g = Math.abs(cData[i * 4 + 1] - pData[i * 4 + 1]);
+        const b = Math.abs(cData[i * 4 + 2] - pData[i * 4 + 2]);
+
+        if ((r + g + b) / 3 > 50) {
+          diff[i] = 255;
+        } else {
+          diff[i] = 0;
+        }
+      }
+
+      const currentBlobs = findBlobsStrict(diff, W, H);
+      const nextTrackedBlobs = [];
+      const now = Date.now();
+
+      currentBlobs.forEach(blob => {
+        octx.strokeStyle = "#facc15";
+        octx.lineWidth = 3;
+        octx.strokeRect(blob.x, blob.y, blob.w, blob.h);
+
+        let bestMatch = null;
+        let minDistance = 80;
+
+        trackedBlobs.forEach(p => {
+          const dist = Math.hypot(p.cx - blob.cx, p.cy - blob.cy);
+
+          if (dist < minDistance) {
+            minDistance = dist;
+            bestMatch = p;
+          }
+        });
+
+        if (bestMatch) {
+          blob.id = bestMatch.id;
+          blob.startedInLeftZone = bestMatch.startedInLeftZone;
+          blob.isCounted = bestMatch.isCounted;
+
+          const moveX = blob.cx - bestMatch.cx;
+
+          if (
+            !blob.isCounted &&
+            blob.startedInLeftZone &&
+            bestMatch.cx < lineX &&
+            blob.cx >= lineX &&
+            moveX > 0
+          ) {
+            if (now - lastCountTime > 1200) {
+              waitingCount++;
+              blob.isCounted = true;
+              lastCountTime = now;
+
+              flashLine("#34d399");
+              updateUI();
+              sendStateToServer();
+            }
+          }
+        } else {
+          blob.id = nextBlobId++;
+          blob.isCounted = false;
+
+          if (blob.cx < lineX - 15) {
+            blob.startedInLeftZone = true;
+          } else {
+            blob.startedInLeftZone = false;
+          }
+        }
+
+        nextTrackedBlobs.push(blob);
+      });
+
+      trackedBlobs = nextTrackedBlobs;
+      updateUI();
+    }
+
+    prevFrame = curr;
+    requestAnimationFrame(processFrame);
+  }
+
+  function findBlobsStrict(diff, W, H) {
+    const blobs = [];
+    const step = 12;
+
+    for (let y = 0; y < H; y += step) {
+      for (let x = 0; x < W; x += step) {
+        if (diff[y * W + x] === 255) {
+          let found = false;
+
+          for (let b of blobs) {
+            if (
+              x >= b.x - 20 &&
+              x <= b.x + b.w + 20 &&
+              y >= b.y - 20 &&
+              y <= b.y + b.h + 20
+            ) {
+              let x1 = Math.min(b.x, x);
+              let x2 = Math.max(b.x + b.w, x);
+              let y1 = Math.min(b.y, y);
+              let y2 = Math.max(b.y + b.h, y);
+
+              b.x = x1;
+              b.y = y1;
+              b.w = x2 - x1;
+              b.h = y2 - y1;
+              b.cx = x1 + b.w / 2;
+              b.cy = y1 + b.h / 2;
+
+              found = true;
+              break;
+            }
+          }
+
+          if (!found) {
+            blobs.push({
+              x: x,
+              y: y,
+              w: step,
+              h: step,
+              cx: x + step / 2,
+              cy: y + step / 2
+            });
+          }
+        }
+      }
+    }
+
+    return blobs.filter(b => b.w > 110 && b.h > 110);
+  }
+
+  function flashLine(color) {
+    overlay.style.outline = `8px solid ${color}`;
+    setTimeout(() => overlay.style.outline = "none", 350);
+  }
+
+  function updateUI() {
+    const trips = Math.ceil(waitingCount / MAX_CAPACITY);
+    const wait = waitingCount === 0 ? 0 : trips * ELEVATOR_CYCLE;
+
+    document.getElementById("count").innerText = waitingCount;
+    document.getElementById("waitTime").innerText = wait;
+
+    const badge = document.getElementById("badge");
+
+    if (waitingCount === 0) {
+      badge.className = "badge low";
+      badge.innerText = "여유";
+    } else if (waitingCount <= 5) {
+      badge.className = "badge medium";
+      badge.innerText = "보통";
+    } else {
+      badge.className = "badge high";
+      badge.innerText = "혼잡";
+    }
+  }
+
+  function getCurrentState() {
+    const trips = Math.ceil(waitingCount / MAX_CAPACITY);
+    const waitTime = waitingCount === 0 ? 0 : trips * ELEVATOR_CYCLE;
+
+    let status = "여유";
+
+    if (waitingCount === 0) {
+      status = "여유";
+    } else if (waitingCount <= 5) {
+      status = "보통";
+    } else {
+      status = "혼잡";
+    }
+
+    return {
+      waitingCount: waitingCount,
+      waitTime: waitTime,
+      status: status
+    };
+  }
+
+  function sendStateToServer() {
+    socket.emit("adminUpdate", getCurrentState());
+  }
+
+  function resetCount() {
+    waitingCount = 0;
+    trackedBlobs = [];
+    lastCountTime = 0;
+
+    updateUI();
+    socket.emit("resetCount");
+  }
+</script>
+</body>
+</html>
